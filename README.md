@@ -7,9 +7,9 @@
 - 最新版固定链接：
   `https://raw.githubusercontent.com/ukonic/Rex-Bilibili/main/Rex-Bilibili-Video.js`
 - v0.2.7 固定版本：
-  `https://raw.githubusercontent.com/ukonic/Rex-Bilibili/main/Rex-Bilibili-Video-v0.2.7.js`
+  `https://raw.githubusercontent.com/ukonic/Rex-Bilibili/main/versions/Rex-Bilibili-Video-v0.2.7.js`
 
-`Rex-Bilibili-Video.js` 会始终指向当前发布的最新版，适合在 Rex 中长期使用同一个导入链接；带版本号的文件便于回退和排查。
+`Rex-Bilibili-Video.js` 会始终指向当前发布的最新版，适合在 Rex 中长期使用同一个导入链接；所有带版本号的 JS 文件统一存放在 `versions/` 文件夹，便于回退和排查。
 
 ## v0.2.7 主要功能
 
