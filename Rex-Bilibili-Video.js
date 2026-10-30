@@ -1,16 +1,16 @@
 /* WidgetMetadata {
   "id": "com.local.rex.bilibili.video",
-  "title": "哔哩哔哩 v0.2.6",
-  "version": "0.2.6",
+  "title": "哔哩哔哩 v0.2.7",
+  "version": "0.2.7",
   "author": "ukonic"
 } */
 
 var WidgetMetadata = {
   id: "com.local.rex.bilibili.video",
-  title: "哔哩哔哩 v0.2.6",
-  description: "修复搜索与继续观看详情缺少 UP主头像/剧照，并增加 UP主投稿兜底入口；保留 DASH 画质诊断、弹幕、多P和合集。",
+  title: "哔哩哔哩 v0.2.7",
+  description: "在搜索与继续观看详情中直接预加载 UP主过往投稿，并增加按 UP主名称搜索校验 MID 的第三路回退。",
   author: "ukonic",
-  version: "0.2.6",
+  version: "0.2.7",
   requiredVersion: "0.0.2",
   detailCacheDuration: 60,
   globalParams: [
@@ -276,13 +276,14 @@ var WidgetMetadata = {
 
 var BILI_API = "https://api.bilibili.com";
 var BILI_BASE = "https://www.bilibili.com";
-var BILI_VERSION = "0.2.6";
-var BILI_BUILD_DATE = "2026-10-30";
+var BILI_VERSION = "0.2.7";
+var BILI_BUILD_DATE = "2026-10-31";
 var BILI_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 var BILI_WBI_CACHE = { key: "", expiresAt: 0 };
 var BILI_ANON_CACHE = { cookie: "", expiresAt: 0 };
 var BILI_DANMU_CACHE = { cid: "", xml: "", expiresAt: 0 };
 var BILI_UP_FEED_OFFSETS = Object.create(null);
+var BILI_UP_PROFILE_CACHE = Object.create(null);
 var BILI_LAST_DIAGNOSTIC = { id: "", code: "", stage: "", message: "" };
 // Rex 为单用户模块运行时；Cookie 只在当前调用进程内用于 B站授权请求，不进入 storage、日志或播放资源对象。
 var BILI_RUNTIME_AUTH = { cookie: "", configured: false };
@@ -730,8 +731,20 @@ function biliOwnerData(data) {
   };
 }
 
-function biliPeopleItems(data) {
+function biliRememberOwner(data) {
   var owner = biliOwnerData(data);
+  if (!owner.mid) return owner;
+  var cached = BILI_UP_PROFILE_CACHE[owner.mid] || {};
+  BILI_UP_PROFILE_CACHE[owner.mid] = {
+    mid: owner.mid,
+    name: owner.name || cached.name || "",
+    face: owner.face || cached.face || ""
+  };
+  return BILI_UP_PROFILE_CACHE[owner.mid];
+}
+
+function biliPeopleItems(data) {
+  var owner = biliRememberOwner(data);
   if (!owner.mid) return [];
   var title = owner.name || ("UP主 " + owner.mid);
   return [{
@@ -1168,6 +1181,55 @@ async function biliUserVideosWbi(mid, page, count, order) {
   return biliItems(list);
 }
 
+async function biliUserProfile(mid, preferredName) {
+  var cached = BILI_UP_PROFILE_CACHE[mid] || {};
+  var preferred = biliStripHtml(preferredName);
+  if (preferred && preferred !== ("UP主 " + mid)) {
+    cached = biliRememberOwner({ owner: { mid: mid, name: preferred, face: cached.face } });
+  }
+  if (cached.name) return cached;
+  try {
+    var url = BILI_API + "/x/web-interface/card?" + biliQuery({ mid: mid });
+    var data = biliApiData(
+      await biliGetJson(url, "https://space.bilibili.com/" + mid, { stage: "api.user.card" }),
+      "UP主资料", "api.user.card"
+    );
+    var card = data && data.card || data || {};
+    return biliRememberOwner({ owner: { mid: mid, name: card.name, face: card.face } });
+  } catch (error) {
+    biliLog(error && error.diagnosticId ? error.diagnosticId : "UPCARD", "WARN", "api.user.card", "profile fallback unavailable");
+    return cached;
+  }
+}
+
+async function biliUserVideosSearch(mid, name, page, count, order) {
+  var profile = await biliUserProfile(mid, name);
+  var keyword = biliStripHtml(profile && profile.name);
+  if (!keyword || keyword === ("UP主 " + mid)) return [];
+  var required = page * count;
+  var raw = [];
+  var seen = Object.create(null);
+  var searchOrder = order === "click" || order === "stow" ? order : "pubdate";
+  for (var searchPage = 1; searchPage <= 3 && raw.length < required; searchPage += 1) {
+    var data = await biliSearchResult(keyword, searchOrder, "0", "0", searchPage, 50);
+    var list = Array.isArray(data.result) ? data.result : [];
+    list.forEach(function (entry) {
+      var owner = biliOwnerData(entry);
+      var bvid = biliBvid(entry && (entry.bvid || entry.arcurl || entry.url));
+      if (owner.mid !== mid || !bvid || seen[bvid]) return;
+      seen[bvid] = true;
+      raw.push(entry);
+    });
+    if (!list.length || list.length < 50) break;
+  }
+  var selected = raw.slice((page - 1) * count, page * count);
+  var items = await biliSearchItems(selected);
+  items.forEach(function (item) {
+    item.description = biliText(item.description) + "\n来源：搜索校验 MID 回退";
+  });
+  return items;
+}
+
 function biliDynamicArchiveItems(data, fallbackMid) {
   var results = [];
   var seen = Object.create(null);
@@ -1255,6 +1317,7 @@ async function loadBiliUserVideos(params) {
   allowed.stow = true;
   var order = biliText(params.order || "pubdate");
   if (!allowed[order]) order = "pubdate";
+  var preferredName = biliStripHtml(params.upName || params.ownerName || params.authorName || params.name);
   var primaryError = null;
   var primaryEmpty = false;
   try {
@@ -1264,25 +1327,37 @@ async function loadBiliUserVideos(params) {
   } catch (error) {
     primaryError = error;
   }
+  var dynamicError = null;
+  var dynamicEmpty = false;
   try {
     var fallbackItems = await biliUserVideosDynamic(mid, page, count);
-    if (!fallbackItems.length) {
-      return [biliMessageCard(
-        "UP主暂无可识别投稿",
-        "MID：" + mid + "\n主投稿接口：" + (primaryEmpty ? "返回空列表" : "请求失败") + "\n动态页回退：没有识别到视频。",
-        "BILI-USER-EMPTY"
-      )];
+    if (fallbackItems.length) {
+      fallbackItems.forEach(function (item) {
+        item.description = biliText(item.description) + "\n来源：动态页回退（按最新发布）";
+      });
+      return fallbackItems;
     }
-    fallbackItems.forEach(function (item) {
-      item.description = biliText(item.description) + "\n来源：动态页回退（按最新发布）";
-    });
-    return fallbackItems;
+    dynamicEmpty = true;
   } catch (fallbackError) {
-    var description = "主投稿接口：" + (primaryError && primaryError.message ? primaryError.message : "请求失败") +
-      "\n动态页回退：" + (fallbackError && fallbackError.message ? fallbackError.message : "请求失败") +
-      "\nB站空间接口风控较严，其他模块功能不受影响。";
-    return [biliMessageCard("UP主投稿加载失败", description, fallbackError.code || (primaryError && primaryError.code) || "BILI-RISK-412")];
+    dynamicError = fallbackError;
   }
+  var searchError = null;
+  try {
+    var searchItems = await biliUserVideosSearch(mid, preferredName, page, count, order);
+    if (searchItems.length) return searchItems;
+  } catch (error) {
+    searchError = error;
+  }
+  var description = "MID：" + mid +
+    "\n主投稿接口：" + (primaryEmpty ? "返回空列表" : (primaryError && primaryError.message ? primaryError.message : "请求失败")) +
+    "\n动态页回退：" + (dynamicEmpty ? "没有识别到视频" : (dynamicError && dynamicError.message ? dynamicError.message : "请求失败")) +
+    "\n搜索校验 MID 回退：" + (searchError && searchError.message ? searchError.message : "没有匹配到投稿") +
+    "\nB站空间接口风控较严，稍后重试或从视频详情中的投稿列表进入。";
+  return [biliMessageCard(
+    primaryError || dynamicError || searchError ? "UP主投稿加载失败" : "UP主暂无可识别投稿",
+    description,
+    (searchError && searchError.code) || (dynamicError && dynamicError.code) || (primaryError && primaryError.code) || "BILI-USER-EMPTY"
+  )];
 }
 
 async function biliVideoDetail(bvid) {
@@ -1336,6 +1411,41 @@ async function biliRelatedItems(bvid) {
     }).slice(0, 12);
   } catch (error) {
     biliLog(error.diagnosticId || "REL", "WARN", "api.related", error.message);
+    return [];
+  }
+}
+
+async function biliUpRelatedItems(detail, currentBvid) {
+  var owner = biliRememberOwner(detail);
+  if (!owner.mid) return [];
+  try {
+    var request = {
+      peopleId: owner.mid,
+      upName: owner.name,
+      page: 1,
+      count: 12,
+      order: "pubdate"
+    };
+    var items = await loadBiliUserVideos(request);
+    var usable = items.filter(function (item) {
+      if (!item || String(item.link || "").indexOf("rexBiliMessage=") >= 0) return false;
+      return biliBvid(item.link) !== currentBvid;
+    });
+    if (!usable.length) {
+      request.count = 20;
+      items = await loadBiliUserVideos(request);
+      usable = items.filter(function (item) {
+        if (!item || String(item.link || "").indexOf("rexBiliMessage=") >= 0) return false;
+        return biliBvid(item.link) !== currentBvid;
+      });
+    }
+    return usable.slice(0, 8).map(function (item) {
+      item.title = "[UP主投稿] " + biliText(item.title).replace(/^\[UP主投稿\]\s*/, "");
+      item.genreTitle = (owner.name || ("UP主 " + owner.mid)) + " · 投稿";
+      return item;
+    });
+  } catch (error) {
+    biliLog(error && error.diagnosticId ? error.diagnosticId : "UPREL", "WARN", "detail.user.videos", "UP related fallback unavailable");
     return [];
   }
 }
@@ -1412,7 +1522,7 @@ async function biliUpPortalDetail(link) {
   var avatar = biliHttps(biliQueryValue(link, "avatar"));
   var owner = { mid: mid, name: name, face: avatar };
   var item = biliUpPortalItem(owner);
-  var videos = await loadBiliUserVideos({ peopleId: mid, page: 1, count: 30, order: "pubdate" });
+  var videos = await loadBiliUserVideos({ peopleId: mid, upName: name, page: 1, count: 30, order: "pubdate" });
   item.title = name + " · 过往投稿";
   item.description = "UP主：" + name + "\nMID：" + mid + "\n已加载投稿：" + videos.length + " 个\n此入口不依赖继续观看保存的列表模块归属。";
   item.relatedItems = videos;
@@ -1457,9 +1567,24 @@ async function loadDetail(link, params) {
       "\n合集视频：" + biliText(detail.ugc_season.ep_count || 0) + " 个";
     item.childItems = biliCollectionItems(detail);
   }
-  var relatedItems = await biliRelatedItems(identity.bvid);
+  var relatedResult = await Promise.all([
+    biliUpRelatedItems(detail, identity.bvid),
+    biliRelatedItems(identity.bvid)
+  ]);
+  var upVideoItems = relatedResult[0];
+  var relatedItems = relatedResult[1];
   var upPortal = biliUpPortalItem(detail);
-  item.relatedItems = upPortal ? [upPortal].concat(relatedItems) : relatedItems;
+  var combinedRelated = upVideoItems.concat(upPortal ? [upPortal] : []).concat(relatedItems);
+  var relatedSeen = Object.create(null);
+  item.relatedItems = combinedRelated.filter(function (entry) {
+    if (!entry) return false;
+    var entryBvid = biliBvid(entry.link);
+    var key = entryBvid || biliText(entry.link || entry.id || entry.title);
+    if (!key || relatedSeen[key]) return false;
+    relatedSeen[key] = true;
+    return entryBvid !== identity.bvid;
+  }).slice(0, 24);
+  item.description += "\n\nUP主过往投稿：详情页已预加载 " + upVideoItems.length + " 个；仍可点击 UP主头像或备用入口查看更多";
   item.description += "\n\n播放资源：起播时按全局画质设置实时获取；账号 Cookie 不写入模块日志或源码，仅随授权请求使用";
   return item;
 }
@@ -1618,7 +1743,7 @@ function biliResourcesFromPlayData(bvid, page, playData, linePrefix, requestedQu
     return [];
   }
   if (durl.length > 1) {
-    throw biliMakeError("BILI-PLAY-002", "playback.resources", "当前是旧式多段视频，v0.2.6 不会只播放第一段", { bvid: bvid, page: page });
+    throw biliMakeError("BILI-PLAY-002", "playback.resources", "当前是旧式多段视频，v0.2.7 不会只播放第一段", { bvid: bvid, page: page });
   }
   var quality = Number(playData.quality || 0);
   var qualityName = biliQualityName(quality, playData.accept_description, playData.accept_quality);
