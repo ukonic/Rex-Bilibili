@@ -8,7 +8,7 @@
 var WidgetMetadata = {
   id: "com.local.rex.bilibili.video",
   title: "哔哩哔哩 v0.2.7",
-  description: "在搜索与继续观看详情中直接预加载 UP主过往投稿，并增加按 UP主名称搜索校验 MID 的第三路回退。",
+  description: "提供 B站视频推荐、分区、搜索、详情、多P、合集、UP主投稿、弹幕及多画质播放能力。",
   author: "ukonic",
   version: "0.2.7",
   requiredVersion: "0.0.2",
