@@ -1,16 +1,16 @@
 /* WidgetMetadata {
   "id": "com.local.rex.bilibili.video",
-  "title": "哔哩哔哩 v0.2.7",
-  "version": "0.2.7",
+  "title": "哔哩哔哩 v0.2.8",
+  "version": "0.2.8",
   "author": "ukonic"
 } */
 
 var WidgetMetadata = {
   id: "com.local.rex.bilibili.video",
-  title: "哔哩哔哩 v0.2.7",
+  title: "哔哩哔哩 v0.2.8",
   description: "提供 B站视频推荐、分区、搜索、详情、多P、合集、UP主投稿、弹幕及多画质播放能力。",
   author: "ukonic",
-  version: "0.2.7",
+  version: "0.2.8",
   requiredVersion: "0.0.2",
   detailCacheDuration: 60,
   globalParams: [
@@ -276,7 +276,7 @@ var WidgetMetadata = {
 
 var BILI_API = "https://api.bilibili.com";
 var BILI_BASE = "https://www.bilibili.com";
-var BILI_VERSION = "0.2.7";
+var BILI_VERSION = "0.2.8";
 var BILI_BUILD_DATE = "2026-10-31";
 var BILI_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 var BILI_WBI_CACHE = { key: "", expiresAt: 0 };
@@ -647,9 +647,19 @@ async function biliGetJson(url, referer, options) {
   var startedAt = Date.now();
   biliLog(traceId, "START", stage, "request");
   try {
-    var response = await Widget.http.get(url, { headers: requestHeaders });
+    var response;
+    var retried = false;
+    try {
+      response = await Widget.http.get(url, { headers: requestHeaders });
+    } catch (error) {
+      var httpError = /^HTTP\s+(5\d{2})\b/i.exec(biliText(error && error.message));
+      if (!httpError || options.retry === false) throw error;
+      retried = true;
+      biliLog(traceId, "RETRY", stage, "HTTP " + httpError[1]);
+      response = await Widget.http.get(url, { headers: requestHeaders });
+    }
     var status = biliResponseStatus(response);
-    if (status >= 500 && options.retry !== false) {
+    if (!retried && status >= 500 && status < 600 && options.retry !== false) {
       biliLog(traceId, "RETRY", stage, "HTTP " + status);
       response = await Widget.http.get(url, { headers: requestHeaders });
       status = biliResponseStatus(response);
@@ -755,22 +765,6 @@ function biliPeopleItems(data) {
     avatar_url: owner.face,
     role: "UP主"
   }];
-}
-
-function biliDetailInput(link, params) {
-  var candidates = [];
-  function append(value) {
-    if (value === null || value === undefined) return;
-    if (typeof value === "object") {
-      [value.link, value.id, value.videoUrl, value.url, value.input, value.bvid].forEach(append);
-      return;
-    }
-    var text = biliText(value).trim();
-    if (text && text !== "[object Object]") candidates.push(text);
-  }
-  append(link);
-  append(params);
-  return candidates.length ? candidates[0] : "";
 }
 
 function biliQueryValue(input, name) {
@@ -1517,7 +1511,9 @@ function biliUpPortalItem(data) {
 
 async function biliUpPortalDetail(link) {
   var mid = biliQueryValue(link, "rexBiliUp").trim();
-  if (!/^\d+$/.test(mid) || Number(mid) <= 0) return null;
+  if (!/^\d+$/.test(mid) || Number(mid) <= 0) {
+    throw biliMakeError("BILI-INPUT-001", "detail.uploader", "UP主详情链接中的 MID 无效");
+  }
   var name = biliStripHtml(biliQueryValue(link, "name")) || ("UP主 " + mid);
   var avatar = biliHttps(biliQueryValue(link, "avatar"));
   var owner = { mid: mid, name: name, face: avatar };
@@ -1530,19 +1526,13 @@ async function biliUpPortalDetail(link) {
   return item;
 }
 
-async function loadDetail(link, params) {
-  link = biliDetailInput(link, params);
-  if (!link) return null;
+async function loadDetail(link) {
+  link = typeof link === "string" ? link.trim() : "";
+  if (!link) throw biliMakeError("BILI-INPUT-001", "detail.input", "缺少 B站详情链接");
   var messageItem = biliMessageCardFromLink(link);
   if (messageItem) return messageItem;
   if (biliQueryValue(link, "rexBiliUp")) return biliUpPortalDetail(link);
-  var identity;
-  try {
-    identity = await biliResolveInput(link);
-  } catch (error) {
-    if (error && error.code === "BILI-INPUT-001") return null;
-    throw error;
-  }
+  var identity = await biliResolveInput(link);
   var detail = await biliVideoDetail(identity.bvid);
   var pages = Array.isArray(detail.pages) ? detail.pages : [];
   if (identity.page > Math.max(1, pages.length)) throw biliMakeError("BILI-INPUT-002", "detail.page", "分P页码超出范围", identity);
@@ -1591,10 +1581,17 @@ async function loadDetail(link, params) {
 
 function biliPageData(detail, page) {
   var pages = Array.isArray(detail.pages) ? detail.pages : [];
-  if (!pages.length) return { cid: detail.cid, page: 1, part: detail.title, duration: detail.duration };
+  if (!pages.length && page === 1) return { cid: detail.cid, page: 1, part: detail.title, duration: detail.duration };
   var selected = pages.filter(function (entry) { return Number(entry.page) === Number(page); })[0];
   if (!selected) throw biliMakeError("BILI-INPUT-002", "playback.page", "分P页码超出范围", { bvid: detail.bvid, page: page });
   return selected;
+}
+
+function biliContextPage(input, resolvedPage, episode) {
+  // 链接或短链接目标已指定分 P 时，其优先级高于 Rex 的集数。
+  if (resolvedPage !== 1 || /[?&]p=\d+/i.test(biliText(input))) return resolvedPage;
+  var value = biliText(episode).trim();
+  return /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : resolvedPage;
 }
 
 function biliQualityName(value, descriptions, qualities) {
@@ -1743,7 +1740,7 @@ function biliResourcesFromPlayData(bvid, page, playData, linePrefix, requestedQu
     return [];
   }
   if (durl.length > 1) {
-    throw biliMakeError("BILI-PLAY-002", "playback.resources", "当前是旧式多段视频，v0.2.7 不会只播放第一段", { bvid: bvid, page: page });
+    throw biliMakeError("BILI-PLAY-002", "playback.resources", "当前是旧式多段视频，v" + BILI_VERSION + " 不会只播放第一段", { bvid: bvid, page: page });
   }
   var quality = Number(playData.quality || 0);
   var qualityName = biliQualityName(quality, playData.accept_description, playData.accept_quality);
@@ -1779,6 +1776,7 @@ async function loadResource(params) {
   if (biliMessageCardFromLink(playbackInput)) throw biliMakeError("BILI-INPUT-001", "playback.message", "这是模块提示卡，不是可播放视频");
   var identity = await biliResolveInput(playbackInput);
   if (!identity || !identity.bvid) throw biliMakeError("BILI-INPUT-001", "playback.identity", "缺少 B站 BV 号");
+  identity.page = biliContextPage(playbackInput, identity.page, params.episode);
   var detail = await biliVideoDetail(identity.bvid);
   var selectedPage = biliPageData(detail, identity.page);
   var requestedQuality = biliRequestedQuality(params);
@@ -1881,7 +1879,8 @@ async function biliDanmuCid(params) {
   var identity = await biliResolveInput(target);
   if (!identity || !identity.bvid) throw biliMakeError("BILI-INPUT-001", "danmu.identity", "弹幕加载缺少 BV号或 CID");
   var detail = await biliVideoDetail(identity.bvid);
-  return biliText(biliPageData(detail, identity.page).cid);
+  var page = biliContextPage(target, identity.page, params.episode);
+  return biliText(biliPageData(detail, page).cid);
 }
 
 async function biliDanmuXml(params) {
@@ -2006,6 +2005,7 @@ async function getBiliDanmuDetail(params) {
     var page = Math.max(1, Number(pageData.page || index + 1));
     return {
       episodeId: biliText(pageData.cid),
+      episodeNumber: String(page),
       episodeTitle: "P" + page + " · " + biliStripHtml(pageData.part || detail.title || "")
     };
   }).filter(function (item) { return /^\d+$/.test(item.episodeId) && Number(item.episodeId) > 0; });
