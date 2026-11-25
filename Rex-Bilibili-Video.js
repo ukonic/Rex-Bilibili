@@ -1,16 +1,17 @@
 /* WidgetMetadata {
   "id": "com.local.rex.bilibili.video",
-  "title": "哔哩哔哩 v0.2.8",
-  "version": "0.2.8",
+  "title": "哔哩哔哩 v0.2.9",
+  "version": "0.2.9",
   "author": "ukonic"
 } */
 
 var WidgetMetadata = {
   id: "com.local.rex.bilibili.video",
-  title: "哔哩哔哩 v0.2.8",
+  title: "哔哩哔哩 v0.2.9",
+  iconurl: "https://www.bilibili.com/favicon.ico",
   description: "提供 B站视频推荐、分区、搜索、详情、多P、合集、UP主投稿、弹幕及多画质播放能力。",
   author: "ukonic",
-  version: "0.2.8",
+  version: "0.2.9",
   requiredVersion: "0.0.2",
   detailCacheDuration: 60,
   globalParams: [
@@ -276,7 +277,7 @@ var WidgetMetadata = {
 
 var BILI_API = "https://api.bilibili.com";
 var BILI_BASE = "https://www.bilibili.com";
-var BILI_VERSION = "0.2.8";
+var BILI_VERSION = "0.2.9";
 var BILI_BUILD_DATE = "2026-10-31";
 var BILI_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 var BILI_WBI_CACHE = { key: "", expiresAt: 0 };
